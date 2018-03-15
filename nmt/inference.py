@@ -25,6 +25,7 @@ from . import attention_model
 from . import gnmt_model
 from . import model as nmt_model
 from . import model_helper
+from . import server
 from .utils import misc_utils as utils
 from .utils import nmt_utils
 
@@ -73,6 +74,8 @@ def load_data(inference_input_file, hparams=None):
   with codecs.getreader("utf-8")(
       tf.gfile.GFile(inference_input_file, mode="rb")) as f:
     inference_data = f.read().splitlines()
+
+  print("hparams.inference_indices = {}".format(hparams.inference_indices))
 
   if hparams and hparams.inference_indices:
     inference_data = [inference_data[i] for i in hparams.inference_indices]
@@ -128,41 +131,37 @@ def single_worker_inference(infer_model,
   output_infer = inference_output_file
 
   # Read data
-  infer_data = load_data(inference_input_file, hparams)
+  #infer_data = load_data(inference_input_file, hparams)
 
-  with tf.Session(
-      graph=infer_model.graph, config=utils.get_config_proto()) as sess:
-    loaded_infer_model = model_helper.load_model(
-        infer_model.model, ckpt, sess, "infer")
-    sess.run(
-        infer_model.iterator.initializer,
-        feed_dict={
-            infer_model.src_placeholder: infer_data,
-            infer_model.batch_size_placeholder: hparams.infer_batch_size
-        })
-    # Decode
-    utils.print_out("# Start decoding")
-    if hparams.inference_indices:
-      _decode_inference_indices(
-          loaded_infer_model,
-          sess,
-          output_infer=output_infer,
-          output_infer_summary_prefix=output_infer,
-          inference_indices=hparams.inference_indices,
-          tgt_eos=hparams.eos,
-          subword_option=hparams.subword_option)
-    else:
-      nmt_utils.decode_and_evaluate(
-          "infer",
-          loaded_infer_model,
-          sess,
-          output_infer,
-          ref_file=None,
-          metrics=hparams.metrics,
-          subword_option=hparams.subword_option,
-          beam_width=hparams.beam_width,
-          tgt_eos=hparams.eos,
-          num_translations_per_input=hparams.num_translations_per_input)
+  with tf.Session(graph=infer_model.graph, config=utils.get_config_proto()) as sess:
+    loaded_infer_model = model_helper.load_model(infer_model.model, ckpt, sess, "infer")
+
+    def compute(request):
+        infer_data = [s for s in request.input_sentences]
+        # infer_data = load_data(inference_input_file, hparams)
+        sess.run(
+            infer_model.iterator.initializer,
+            feed_dict={
+                infer_model.src_placeholder: infer_data,
+                infer_model.batch_size_placeholder: len(infer_data)
+            })
+        # Decode
+        return nmt_utils.decode_and_evaluate(
+            "infer",
+            loaded_infer_model,
+            sess,
+            output_infer,
+            ref_file=None,
+            metrics=hparams.metrics,
+            subword_option=hparams.subword_option,
+            beam_width=hparams.beam_width,
+            tgt_eos=hparams.eos,
+            num_translations_per_input=hparams.num_translations_per_input
+        )
+
+    engine = server.InferenceServer(compute)
+    server.run(engine=engine)
+
 
 
 def multi_worker_inference(infer_model,
